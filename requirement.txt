@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+requests
+httpx
+pypdf
+python-docx
+pydantic
