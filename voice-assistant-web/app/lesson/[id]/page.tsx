@@ -10,6 +10,7 @@ type Attempt = {
   question: string
   answer: string
   feedback: string
+  isCorrect?: boolean
 }
 
 export default function LessonPage() {
@@ -30,8 +31,13 @@ export default function LessonPage() {
 
   if (!unit) return null
 
-  const currentQuestion = unit.questions[questionIndex]
-  const isLastQuestion = questionIndex === unit.questions.length - 1
+  const currentExercise = unit.practiceExercises?.[questionIndex]
+  const practiceQuestions = unit.practiceExercises?.map((exercise) => exercise.prompt) ?? unit.questions
+  const currentQuestion = practiceQuestions[questionIndex]
+  const isLastQuestion = questionIndex === practiceQuestions.length - 1
+  const isCurrentCorrect = currentExercise
+    ? answer.trim().toLowerCase() === currentExercise.answer.toLowerCase()
+    : undefined
 
   const checkAnswer = async () => {
     const learnerAnswer = answer.trim()
@@ -39,6 +45,21 @@ export default function LessonPage() {
 
     setIsChecking(true)
     setFeedback("")
+
+    if (currentExercise) {
+      const isCorrect = learnerAnswer.toLowerCase() === currentExercise.answer.toLowerCase()
+      const review = isCorrect
+        ? `Correct! ${currentExercise.explanation}`
+        : `Not quite. The correct answer is “${currentExercise.answer}”. ${currentExercise.explanation}`
+
+      setFeedback(review)
+      setAttempts((previous) => [
+        ...previous.filter((item) => item.question !== currentQuestion),
+        { question: currentQuestion, answer: learnerAnswer, feedback: review, isCorrect },
+      ])
+      setIsChecking(false)
+      return
+    }
 
     const prompt = [
       `Review a Grade 10 learner's answer for ${unit.title}.`,
@@ -119,10 +140,10 @@ export default function LessonPage() {
             <div className="mt-7">
               <div className="mb-2 flex justify-between text-xs font-black uppercase tracking-wide">
                 <span>Progress</span>
-                <span>{attempts.length}/{unit.questions.length}</span>
+                <span>{attempts.length}/{practiceQuestions.length}</span>
               </div>
               <div className="h-3 overflow-hidden rounded-full bg-[#e8d6b9]">
-                <div className="h-full bg-[#dc3e1d] transition-all" style={{ width: `${(attempts.length / unit.questions.length) * 100}%` }} />
+                <div className="h-full bg-[#dc3e1d] transition-all" style={{ width: `${(attempts.length / practiceQuestions.length) * 100}%` }} />
               </div>
             </div>
 
@@ -130,9 +151,13 @@ export default function LessonPage() {
               <h3 className="text-sm font-black uppercase tracking-[0.16em]">Useful words</h3>
               <div className="mt-3 flex flex-wrap gap-2">
                 {unit.vocabulary.map((word) => (
-                  <button key={word} onClick={() => setAnswer((value) => `${value}${value ? " " : ""}${word}`)} className="rounded-full border border-[#303b1f]/25 bg-white px-3 py-1.5 text-sm hover:border-[#dc3e1d]">
-                    {word}
-                  </button>
+                  currentExercise ? (
+                    <span key={word} className="rounded-full border border-[#303b1f]/25 bg-white px-3 py-1.5 text-sm">{word}</span>
+                  ) : (
+                    <button key={word} onClick={() => setAnswer((value) => `${value}${value ? " " : ""}${word}`)} className="rounded-full border border-[#303b1f]/25 bg-white px-3 py-1.5 text-sm hover:border-[#dc3e1d]">
+                      {word}
+                    </button>
+                  )
                 ))}
               </div>
             </div>
@@ -142,7 +167,7 @@ export default function LessonPage() {
             {!showReview ? (
               <>
                 <div className="mb-4 flex items-center justify-between">
-                  <p className="text-sm font-black uppercase tracking-[0.18em] text-[#dc3e1d]">Question {questionIndex + 1} of {unit.questions.length}</p>
+                  <p className="text-sm font-black uppercase tracking-[0.18em] text-[#dc3e1d]">Question {questionIndex + 1} of {practiceQuestions.length}</p>
                   {attempts.length > 0 && <button onClick={() => setShowReview(true)} className="text-sm font-bold underline">Review practice</button>}
                 </div>
 
@@ -150,29 +175,59 @@ export default function LessonPage() {
                   <div className="flex flex-col justify-between bg-[#303b1f] p-8 text-[#f3e7d2]">
                     <div>
                       <p className="text-xs font-black uppercase tracking-[0.22em] text-[#f3e7d2]/55">Question</p>
+                      {currentExercise && <p className="mt-4 text-sm font-bold text-[#f3e7d2]/70">{currentExercise.section}</p>}
                       <h2 className="mt-6 text-3xl font-black leading-tight">{currentQuestion}</h2>
                     </div>
-                    <p className="mt-10 text-sm text-[#f3e7d2]/60">Answer in 2–4 complete English sentences.</p>
+                    <p className="mt-10 text-sm text-[#f3e7d2]/60">
+                      {currentExercise ? currentExercise.instruction : "Answer in 2–4 complete English sentences."}
+                    </p>
                   </div>
 
                   <div className="flex flex-col bg-white p-8">
                     <label htmlFor="practice-answer" className="text-xs font-black uppercase tracking-[0.22em] text-[#dc3e1d]">Your answer</label>
-                    <textarea
-                      id="practice-answer"
-                      value={answer}
-                      onChange={(event) => setAnswer(event.target.value)}
-                      placeholder="Write your answer here..."
-                      className="mt-5 min-h-48 flex-1 resize-none border-b-2 border-[#303b1f]/25 bg-transparent text-lg leading-8 outline-none focus:border-[#dc3e1d]"
-                    />
+                    {currentExercise ? (
+                      <div id="practice-answer" className="mt-5 grid flex-1 content-start gap-3">
+                        {currentExercise.options.map((option, optionIndex) => (
+                          <button
+                            key={option}
+                            type="button"
+                            onClick={() => {
+                              setAnswer(option)
+                              setFeedback("")
+                            }}
+                            className={`flex items-start gap-3 border-2 p-4 text-left font-bold transition ${
+                              answer === option
+                                ? "border-[#dc3e1d] bg-[#f3e7d2]"
+                                : "border-[#303b1f]/20 hover:border-[#303b1f]"
+                            }`}
+                          >
+                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#303b1f] text-sm text-white">
+                              {String.fromCharCode(65 + optionIndex)}
+                            </span>
+                            <span className="leading-7">{option}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <textarea
+                        id="practice-answer"
+                        value={answer}
+                        onChange={(event) => setAnswer(event.target.value)}
+                        placeholder="Write your answer here..."
+                        className="mt-5 min-h-48 flex-1 resize-none border-b-2 border-[#303b1f]/25 bg-transparent text-lg leading-8 outline-none focus:border-[#dc3e1d]"
+                      />
+                    )}
                     <button onClick={checkAnswer} disabled={!answer.trim() || isChecking} className="mt-6 bg-[#dc3e1d] px-6 py-3 font-black text-white transition hover:bg-[#b93018] disabled:opacity-40">
-                      {isChecking ? "Checking with local model..." : "Check my answer"}
+                      {isChecking ? "Checking..." : "Check my answer"}
                     </button>
                   </div>
                 </div>
 
                 {feedback && (
-                  <div className="mt-6 border-2 border-[#303b1f] bg-[#e8d6b9] p-6 shadow-[5px_5px_0_#303b1f]">
-                    <p className="text-xs font-black uppercase tracking-[0.2em] text-[#dc3e1d]">Tutor feedback</p>
+                  <div className={`mt-6 border-2 border-[#303b1f] p-6 shadow-[5px_5px_0_#303b1f] ${isCurrentCorrect === false ? "bg-[#f7c9bd]" : "bg-[#dce8c8]"}`}>
+                    <p className="text-xs font-black uppercase tracking-[0.2em] text-[#dc3e1d]">
+                      {currentExercise ? (isCurrentCorrect ? "Correct answer" : "Review this answer") : "Tutor feedback"}
+                    </p>
                     <p className="mt-3 whitespace-pre-wrap leading-7">{feedback}</p>
                     <button onClick={continuePractice} className="mt-5 bg-[#303b1f] px-6 py-3 font-black text-[#f3e7d2]">
                       {isLastQuestion ? "Review all practice →" : "Next question →"}
@@ -200,7 +255,9 @@ export default function LessonPage() {
                         <p className="mt-3 text-xl font-black">{attempt.question}</p>
                       </div>
                       <div className="bg-white p-6">
-                        <p className="text-xs font-black uppercase tracking-[0.18em] text-[#dc3e1d]">Your answer</p>
+                        <p className="text-xs font-black uppercase tracking-[0.18em] text-[#dc3e1d]">
+                          {attempt.isCorrect === undefined ? "Your answer" : attempt.isCorrect ? "Correct" : "Needs review"}
+                        </p>
                         <p className="mt-3 leading-7">{attempt.answer}</p>
                         <div className="mt-5 border-l-4 border-[#dc3e1d] bg-[#f3e7d2] p-4 text-sm leading-6">{attempt.feedback}</div>
                       </div>

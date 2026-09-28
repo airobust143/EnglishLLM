@@ -353,6 +353,8 @@ When the user explicitly asks you to review an English answer use up to four sho
 
 When unit teaching guidance is present in CONTEXT follow its level grammar vocabulary and feedback rules
 
+Use only the context relevant to the current conversation and do not mix units unless the learner asks you to compare them
+
 Do not simply give an exercise answer before the learner tries it
 
 Ask a helpful follow up question when the learner needs more practice
@@ -559,7 +561,9 @@ async def chat_stream(req: ChatRequest):
     selected_model = resolve_model(req.model)
     # Đọc toàn bộ documents mỗi request
     # để luôn lấy nội dung mới nhất trong docs/
-    context, files = get_document_context(req.unit)
+    # Speaking practice uses the complete learning library. The selected unit
+    # is a UI conversation prompt, not a retrieval boundary.
+    context, files = get_document_context()
 
     messages = build_messages(
         req.message,
@@ -690,7 +694,8 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream_fast(req: ChatRequest):
-    context, _ = get_document_context(req.unit)
+    # Voice conversations can draw on every document in docs/.
+    context, _ = get_document_context()
     max_tokens = min(req.max_tokens, 256)
 
     if req.provider == "gemini":

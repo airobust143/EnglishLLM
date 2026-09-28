@@ -2,7 +2,7 @@
 
 import useVoiceAssistant from "../../hooks/useVoiceAssistant"
 
-export default function VoiceChat({ unitId }: { unitId?: number }) {
+export default function VoiceChat() {
   const {
     state,
     transcript,
@@ -18,7 +18,7 @@ export default function VoiceChat({ unitId }: { unitId?: number }) {
     provider,
     selectProvider,
     geminiConfigured,
-  } = useVoiceAssistant(unitId)
+  } = useVoiceAssistant()
 
   const getStatusText = () => {
     switch (state) {

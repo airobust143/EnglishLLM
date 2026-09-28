@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { units } from "../../lib/units"
+import CuteStudyCat from "../../components/CuteStudyCat"
 
 type User = { email: string; name: string }
 
@@ -42,14 +43,19 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <section className="mx-auto max-w-6xl px-5 pb-10 pt-14">
-        <p className="mb-4 text-sm font-bold uppercase tracking-[0.24em] text-[#dc3e1d]">Grade 10 guided practice</p>
-        <h2 className="max-w-3xl text-5xl font-black leading-none tracking-[-0.05em] md:text-7xl">
-          Choose a unit.<br />Practise with purpose.
-        </h2>
-        <p className="mt-6 max-w-2xl text-lg leading-8 text-[#303b1f]/70">
-          Each unit uses its own textbook context, questions, vocabulary, and review board.
-        </p>
+      <section className="mx-auto grid max-w-6xl items-center gap-8 px-5 pb-10 pt-10 lg:grid-cols-[1fr_380px] lg:pt-14">
+        <div>
+          <p className="mb-4 text-sm font-bold uppercase tracking-[0.24em] text-[#dc3e1d]">Grade 10 guided practice</p>
+          <h2 className="max-w-3xl text-5xl font-black leading-none tracking-[-0.05em] md:text-7xl">
+            Choose a unit.<br />Practise with purpose.
+          </h2>
+          <p className="mt-6 max-w-2xl text-lg leading-8 text-[#303b1f]/70">
+            Written activities stay organized by unit, while speaking practice can use the complete learning library.
+          </p>
+        </div>
+        <div className="mx-auto w-full max-w-[280px] lg:max-w-none">
+          <CuteStudyCat />
+        </div>
       </section>
 
       <section className="mx-auto max-w-6xl px-5 pb-20">
