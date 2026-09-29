@@ -41,7 +41,7 @@ export default function VoiceLessonPage() {
         </aside>
 
         <section className="overflow-hidden border-2 border-[#303b1f] bg-white shadow-[7px_7px_0_#303b1f]">
-          <VoiceChat />
+          <VoiceChat unit={unit.id} />
         </section>
       </div>
     </main>

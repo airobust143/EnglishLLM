@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import httpx
 import os
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -125,13 +126,11 @@ def resolve_gemini_key() -> str:
 def gemini_chat(
     message: str,
     context: str,
+    unit: int | None,
     api_key: str,
     temperature: float,
     max_tokens: int,
 ) -> str:
-    if not context:
-        context = "(No documents were found in the docs folder)"
-
     response = None
 
     for attempt in range(3):
@@ -145,7 +144,7 @@ def gemini_chat(
                 "contents": [{
                     "role": "user",
                     "parts": [{
-                        "text": f"CONTEXT\n\n{context}\n\nEND CONTEXT\n\nUSER\n\n{message}",
+                        "text": build_user_prompt(message, context, unit),
                     }],
                 }],
                 "generationConfig": {
@@ -316,15 +315,51 @@ def load_all_documents(paths: list[Path] | None = None):
 
 _document_cache = {}
 
+UNIT_CONTENT_FILES = {
+    1: "unit-1-family-life.md",
+    2: "unit-2-humans-environment.md",
+    3: "unit-3-music.md",
+}
+
+UNIT_TOPIC_KEYWORDS = {
+    1: {
+        "family", "parent", "parents", "mother", "father", "mom", "dad",
+        "sister", "brother", "sibling", "siblings", "child", "children",
+        "chore", "chores", "housework", "laundry", "dishes", "cooking",
+        "cook", "clean", "cleaning", "rubbish", "trash", "groceries",
+        "breadwinner", "homemaker", "routine", "responsibility",
+    },
+    2: {
+        "environment", "environmental", "green", "pollution", "recycle",
+        "recycling", "reuse", "plastic", "waste", "litter", "energy",
+        "water", "carbon", "eco", "climate", "tree", "trees", "cleanup",
+        "resources", "nature", "protect",
+    },
+    3: {
+        "music", "song", "songs", "singer", "musician", "artist", "band",
+        "instrument", "instruments", "guitar", "piano", "drums", "concert",
+        "festival", "performance", "perform", "album", "single", "lyrics",
+        "rhythm", "melody", "playlist", "listen", "listening", "audience",
+    },
+}
+
+GREETINGS = {
+    "hello", "hi", "hey", "hello there", "hi there", "good morning",
+    "good afternoon", "good evening",
+}
+
 
 def get_document_context(unit: int | None = None):
-    paths = [
-        path
-        for path in sorted(DOCS_DIR.rglob("*"))
-        if path.is_file()
-        and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        and (unit is None or path.name.startswith(f"unit-{unit}-"))
-    ]
+    if unit is not None:
+        unit_path = DOCS_DIR / UNIT_CONTENT_FILES[unit]
+        paths = [unit_path] if unit_path.is_file() else []
+    else:
+        paths = [
+            path
+            for path in sorted(DOCS_DIR.rglob("*"))
+            if path.is_file()
+            and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
 
     signature = tuple(
         (str(path), path.stat().st_mtime_ns, path.stat().st_size)
@@ -340,80 +375,152 @@ def get_document_context(unit: int | None = None):
     return cached[1]
 
 
+def get_chat_context(unit: int | None):
+    """Keep general chat light and load only the selected lesson file."""
+    if unit is None:
+        return "", []
+
+    return get_document_context(unit)
+
+
 VOICE_SYSTEM_PROMPT = """
-You are a friendly English voice conversation partner
-
-Speak English by default
-
-Keep every response very short
-
-Usually use one short sentence
-
-When the user explicitly asks you to review an English answer use up to four short lines labeled Strength Correction Improved answer and Next step
-
-When unit teaching guidance is present in CONTEXT follow its level grammar vocabulary and feedback rules
-
-Use only the context relevant to the current conversation and do not mix units unless the learner asks you to compare them
-
-Do not simply give an exercise answer before the learner tries it
-
-Ask a helpful follow up question when the learner needs more practice
-
-Use simple natural spoken English
-
-Use contractions naturally
-
-Sound like a real person having a casual conversation
-
-Do not sound formal or academic
-
-Do not give long explanations unless the user asks
-
-Do not repeat the users question
-
-Ask at most one simple follow up question
-
-Do not use markdown
-
-Do not use bullet points
-
-Do not use emojis
-
-Use normal punctuation internally so the streaming client can detect sentences
-
-The client will remove punctuation before speech synthesis
-
-When information is available in CONTEXT use it as the primary source
-
-Do not invent facts that are not supported by CONTEXT
-
-If the requested information is not in CONTEXT say
-
-I cannot find that information in the available documents
-
-Prioritize natural conversation over explanations
+You are a concise English conversation partner
+Answer only the users latest request
+Treat lesson context as optional guidance rather than a restriction
+Never repeat quote or paraphrase the users question
+Answer questions with new relevant information
+Never begin the answer with the same question phrase as the user
+Use lesson context only when it directly answers the request
+Follow the RESPONSE MODE instruction exactly
+For GREETING use one brief greeting and do not ask how you can help
+For TOPIC give two or three useful natural sentences and sometimes end with one relevant question
+For GENERAL answer normally in one or two short sentences without redirecting to the lesson
+Do not reuse a stock phrase from an earlier reply
+When explicitly asked to review an answer give one strength one correction and one improved answer
+Do not mix lesson units or invent facts
+Use simple spoken English normal punctuation and plain text
+Stop when the answer is complete
 """
 
 
-def build_messages(message: str, context: str):
+def get_response_mode(message: str, unit: int | None):
+    normalized = " ".join(re.findall(r"[a-z]+", message.lower()))
 
+    if normalized in GREETINGS:
+        return "GREETING"
+
+    words = set(normalized.split())
+    if unit is not None and words & UNIT_TOPIC_KEYWORDS[unit]:
+        return "TOPIC"
+
+    return "GENERAL"
+
+
+def clean_response(answer: str, message: str, mode: str):
+    """Remove small-model echoing and enforce the selected response mode."""
+    if mode == "GREETING":
+        return "Hi."
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.findall(r"[^.!?]+[.!?]?", answer.strip())
+        if sentence.strip()
+    ]
+
+    if sentences:
+        message_words = set(re.findall(r"[a-z]+", message.lower()))
+        first_words = set(re.findall(r"[a-z]+", sentences[0].lower()))
+
+        if message_words and first_words:
+            shared_ratio = len(message_words & first_words) / min(
+                len(message_words),
+                len(first_words),
+            )
+            if shared_ratio >= 0.75:
+                sentences.pop(0)
+
+    if mode == "GENERAL":
+        statements = [
+            sentence for sentence in sentences
+            if not sentence.endswith("?")
+        ]
+        if statements:
+            sentences = statements[:2]
+    else:
+        if not should_ask_follow_up(message):
+            statements = [
+                sentence for sentence in sentences
+                if not sentence.endswith("?")
+            ]
+            if statements:
+                sentences = statements
+        sentences = sentences[:3]
+
+    cleaned = " ".join(sentences).strip()
+    return cleaned or answer.strip()
+
+
+def should_ask_follow_up(message: str):
+    normalized = " ".join(re.findall(r"[a-z]+", message.lower()))
+    personal_openings = (
+        "i ", "i'm ", "im ", "my ", "we ", "our ", "do you ",
+        "what do you ", "which do you ", "which one do you ",
+    )
+    preference_words = {"favorite", "favourite", "prefer", "opinion"}
+    words = set(normalized.split())
+    return normalized.startswith(personal_openings) or bool(words & preference_words)
+
+
+def build_user_prompt(message: str, context: str, unit: int | None = None):
     if not context:
-        context = (
-            "(No documents were found in the docs folder)"
-        )
+        return message
 
-    user_prompt = f"""
+    response_mode = get_response_mode(message, unit)
+    follow_up_instruction = (
+        "Sentence three should be one short relevant question for continued "
+        "speaking practice."
+        if should_ask_follow_up(message)
+        else "Do not add a follow-up question."
+    )
+
+    mode_instruction = {
+        "GREETING": (
+            "Reply with one brief natural greeting only. "
+            "Do not ask how you can help."
+        ),
+        "TOPIC": (
+            "Write two or three natural sentences using relevant lesson context. "
+            "Sentence one must add a new fact reaction or idea without copying "
+            "the learner. Sentence two must add useful detail. Sentence three "
+            f"may be used only as instructed next. {follow_up_instruction}"
+        ),
+        "GENERAL": (
+            "Answer normally in one or two short sentences using general "
+            "knowledge. Do not mention or redirect to the lesson topic."
+        ),
+    }[response_mode]
+
+    return f"""
 CONTEXT
 
 {context}
 
 END CONTEXT
 
+RESPONSE MODE {response_mode}
+
+{mode_instruction}
+Start immediately with the answer or a new relevant idea.
+Never repeat restate quote or paraphrase the users question.
+Never use the users wording as the opening sentence.
+
 USER
 
 {message}
 """
 
+
+def build_messages(message: str, context: str, unit: int | None = None):
     return [
         {
             "role": "system",
@@ -421,7 +528,7 @@ USER
         },
         {
             "role": "user",
-            "content": user_prompt,
+            "content": build_user_prompt(message, context, unit),
         },
     ]
 
@@ -437,6 +544,7 @@ def ollama_stream(
         "think": False,
         "messages": messages,
         "stream": True,
+        "keep_alive": "30m",
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
@@ -561,13 +669,12 @@ async def chat_stream(req: ChatRequest):
     selected_model = resolve_model(req.model)
     # Đọc toàn bộ documents mỗi request
     # để luôn lấy nội dung mới nhất trong docs/
-    # Speaking practice uses the complete learning library. The selected unit
-    # is a UI conversation prompt, not a retrieval boundary.
-    context, files = get_document_context()
+    context, files = get_chat_context(req.unit)
 
     messages = build_messages(
         req.message,
         context,
+        req.unit,
     )
 
     async def generate():
@@ -582,9 +689,11 @@ async def chat_stream(req: ChatRequest):
 
             "stream": True,
 
+            "keep_alive": "30m",
+
             "options": {
                 "temperature": req.temperature,
-                "num_predict": req.max_tokens,
+                "num_predict": min(req.max_tokens, 256),
             },
         }
 
@@ -694,14 +803,28 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream_fast(req: ChatRequest):
-    # Voice conversations can draw on every document in docs/.
-    context, _ = get_document_context()
-    max_tokens = min(req.max_tokens, 256)
+    context, _ = get_chat_context(req.unit)
+    max_tokens = min(req.max_tokens, 96)
+    response_mode = get_response_mode(req.message, req.unit)
+
+    if response_mode == "GREETING":
+        async def generate_greeting():
+            yield "Hi."
+
+        return StreamingResponse(
+            generate_greeting(),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     if req.provider == "gemini":
         api_key = resolve_gemini_key()
 
         async def generate():
+            chunks = []
             payload = {
                 "systemInstruction": {
                     "parts": [{"text": VOICE_SYSTEM_PROMPT}],
@@ -709,7 +832,7 @@ async def chat_stream_fast(req: ChatRequest):
                 "contents": [{
                     "role": "user",
                     "parts": [{
-                        "text": f"CONTEXT\n\n{context}\n\nEND CONTEXT\n\nUSER\n\n{req.message}",
+                        "text": build_user_prompt(req.message, context, req.unit),
                     }],
                 }],
                 "generationConfig": {
@@ -758,20 +881,29 @@ async def chat_stream_fast(req: ChatRequest):
 
                             for part in parts:
                                 if part.get("text") and not part.get("thought"):
-                                    yield part["text"]
+                                    chunks.append(part["text"])
+
+                    if chunks:
+                        yield clean_response(
+                            "".join(chunks),
+                            req.message,
+                            response_mode,
+                        )
             except httpx.HTTPError:
                 yield "The Gemini service is temporarily unavailable."
 
     else:
         selected_model = resolve_model(req.model)
-        messages = build_messages(req.message, context)
+        messages = build_messages(req.message, context, req.unit)
 
         async def generate():
+            chunks = []
             payload = {
                 "model": selected_model,
                 "think": False,
                 "messages": messages,
                 "stream": True,
+                "keep_alive": "30m",
                 "options": {
                     "temperature": req.temperature,
                     "num_predict": max_tokens,
@@ -799,10 +931,17 @@ async def chat_stream_fast(req: ChatRequest):
                             content = data.get("message", {}).get("content", "")
 
                             if content:
-                                yield content
+                                chunks.append(content)
 
                             if data.get("done"):
                                 break
+
+                    if chunks:
+                        yield clean_response(
+                            "".join(chunks),
+                            req.message,
+                            response_mode,
+                        )
             except httpx.HTTPError:
                 yield "The local Ollama service is unavailable."
 
@@ -818,16 +957,28 @@ async def chat_stream_fast(req: ChatRequest):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    context, files = get_document_context(req.unit)
+    context, files = get_chat_context(req.unit)
+    response_mode = get_response_mode(req.message, req.unit)
+
+    if response_mode == "GREETING":
+        return {
+            "answer": "Hi.",
+            "provider": req.provider,
+            "model": GEMINI_MODEL if req.provider == "gemini" else resolve_model(req.model),
+            "documents": files,
+            "mode": "voice",
+        }
 
     if req.provider == "gemini":
         answer = gemini_chat(
             req.message,
             context,
+            req.unit,
             resolve_gemini_key(),
             req.temperature,
             min(req.max_tokens, 2048),
         )
+        answer = clean_response(answer, req.message, response_mode)
 
         return {
             "answer": answer,
@@ -842,6 +993,7 @@ def chat(req: ChatRequest):
     messages = build_messages(
         req.message,
         context,
+        req.unit,
     )
 
     answer = "".join(
@@ -849,9 +1001,10 @@ def chat(req: ChatRequest):
             messages,
             model=selected_model,
             temperature=req.temperature,
-            max_tokens=min(req.max_tokens, 2048),
+            max_tokens=min(req.max_tokens, 256),
         )
     )
+    answer = clean_response(answer, req.message, response_mode)
 
     return {
         "answer": answer,
