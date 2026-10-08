@@ -17,13 +17,15 @@ import json
 import httpx
 import os
 import re
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 import requests
 from docx import Document
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -57,6 +59,8 @@ load_local_environment(BASE_DIR / ".env")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:0.6b")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 OLLAMA_MODELS = tuple(
     dict.fromkeys(
         model.strip()
@@ -69,7 +73,14 @@ OLLAMA_MODELS = tuple(
 )
 GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
+SPEECH_LOG_ENABLED = os.getenv("SPEECH_LOG_ENABLED", "true").lower() == "true"
+SPEECH_LOG_FILE = BASE_DIR / os.getenv("SPEECH_LOG_FILE", "speech_logs.jsonl")
 PORT = int(os.getenv("PORT", "8000"))
+_whisper_model = None
 
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -101,6 +112,47 @@ class ChatRequest(BaseModel):
     max_tokens: int = 2048
 
 
+class SpeechLogRequest(BaseModel):
+    human: str = Field(min_length=1, max_length=4000)
+    assistant: str = Field(min_length=1, max_length=8000)
+    provider: Literal["ollama", "gemini"] = "ollama"
+    model: str | None = Field(default=None, max_length=200)
+    unit: Literal[1, 2, 3] | None = None
+
+
+@app.post("/logs/speech")
+def log_speech(entry: SpeechLogRequest):
+    """Append one completed conversation to the local JSONL log."""
+    if not SPEECH_LOG_ENABLED:
+        return {"logged": False}
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "human": entry.human.strip(),
+        "assistant": entry.assistant.strip(),
+        "provider": entry.provider,
+        "model": entry.model,
+        "unit": entry.unit,
+    }
+
+    if not record["human"] or not record["assistant"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Both human speech and assistant response are required.",
+        )
+
+    try:
+        with SPEECH_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not write the local speech log.",
+        ) from exc
+
+    return {"logged": True}
+
+
 def resolve_model(requested_model: str | None) -> str:
     model = (requested_model or OLLAMA_MODEL).strip()
 
@@ -121,6 +173,87 @@ def resolve_gemini_key() -> str:
         )
 
     return GEMINI_API_KEY
+
+
+def get_whisper_model():
+    """Load the local Whisper model once, on the first transcription request."""
+    global _whisper_model
+
+    if _whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Local speech-to-text is not installed. "
+                    "Install the backend requirements, including faster-whisper."
+                ),
+            ) from exc
+
+        try:
+            _whisper_model = WhisperModel(
+                WHISPER_MODEL,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE,
+            )
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Could not load the local Whisper model '{WHISPER_MODEL}'. "
+                    "Set WHISPER_MODEL to a downloaded model directory if offline."
+                ),
+            ) from exc
+
+    return _whisper_model
+
+
+@app.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """Transcribe a browser recording locally with Whisper."""
+    if not audio.filename:
+        raise HTTPException(status_code=400, detail="An audio recording is required.")
+
+    audio_data = await audio.read()
+
+    if not audio_data:
+        raise HTTPException(status_code=400, detail="The audio recording is empty.")
+
+    if len(audio_data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The audio recording is too large.")
+
+    suffix = Path(audio.filename).suffix.lower() or ".webm"
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix,
+            delete=False,
+            dir=BASE_DIR,
+        ) as temporary_file:
+            temporary_file.write(audio_data)
+            temporary_path = Path(temporary_file.name)
+
+        model = get_whisper_model()
+        segments, _ = model.transcribe(
+            str(temporary_path),
+            language="en",
+            vad_filter=True,
+            beam_size=WHISPER_BEAM_SIZE,
+            condition_on_previous_text=False,
+        )
+        transcript = " ".join(segment.text.strip() for segment in segments).strip()
+
+        return {"text": transcript}
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not transcribe the audio recording: {exc}",
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def gemini_chat(
@@ -375,12 +508,101 @@ def get_document_context(unit: int | None = None):
     return cached[1]
 
 
-def get_chat_context(unit: int | None):
-    """Keep general chat light and load only the selected lesson file."""
-    if unit is None:
+_rag_cache = {}
+
+
+def _split_retrieval_chunks(text: str, source: str):
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", text)
+        if paragraph.strip()
+    ]
+    chunks = []
+    for index in range(0, len(paragraphs), 2):
+        paragraph_group = paragraphs[index:index + 2]
+        chunk_text = "\n\n".join(paragraph_group)
+        chunks.append({
+            "source": source,
+            "text": chunk_text,
+            "terms": set(re.findall(r"[a-z]+", chunk_text.lower())),
+        })
+    return chunks
+
+
+def _get_retrieval_chunks(unit: int | None):
+    if unit is not None:
+        unit_path = DOCS_DIR / UNIT_CONTENT_FILES[unit]
+        paths = [unit_path] if unit_path.is_file() else []
+    else:
+        paths = [
+            path
+            for path in sorted(DOCS_DIR.rglob("*"))
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        ]
+
+    signature = tuple(
+        (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        for path in paths
+    )
+    cache_key = unit or "all"
+    cached = _rag_cache.get(cache_key)
+
+    if cached is None or cached[0] != signature:
+        chunks = []
+        for path in paths:
+            try:
+                chunks.extend(
+                    _split_retrieval_chunks(
+                        read_document(path),
+                        str(path.relative_to(BASE_DIR)),
+                    )
+                )
+            except (OSError, ValueError):
+                continue
+        cached = (signature, chunks)
+        _rag_cache[cache_key] = cached
+
+    return cached[1]
+
+
+def retrieve_context(message: str, unit: int | None):
+    """Retrieve a few relevant lesson chunks without an embedding dependency."""
+    query_terms = {
+        term
+        for term in re.findall(r"[a-z]+", message.lower())
+        if term not in {
+            "a", "an", "and", "are", "at", "can", "do", "for", "how",
+            "i", "in", "is", "it", "me", "my", "of", "on", "or", "the",
+            "to", "unrelated", "what", "when", "where", "which", "who",
+            "why", "you",
+        }
+    }
+    if not query_terms:
         return "", []
 
-    return get_document_context(unit)
+    scored_chunks = []
+    for chunk in _get_retrieval_chunks(unit):
+        overlap = query_terms & chunk["terms"]
+        if not overlap:
+            continue
+
+        score = len(overlap) / max(len(query_terms), 1)
+        scored_chunks.append((score, len(overlap), chunk))
+
+    scored_chunks.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [item[2] for item in scored_chunks[:max(RAG_TOP_K, 1)]]
+
+    context = "\n\n".join(
+        f"[SOURCE: {chunk['source']}]\n{chunk['text']}"
+        for chunk in selected
+    )
+    files = list(dict.fromkeys(chunk["source"] for chunk in selected))
+    return context, files
+
+
+def get_chat_context(message: str, unit: int | None):
+    """Use lightweight RAG to keep only relevant lesson context in the prompt."""
+    return retrieve_context(message, unit)
 
 
 VOICE_SYSTEM_PROMPT = """
@@ -416,6 +638,20 @@ def get_response_mode(message: str, unit: int | None):
     return "GENERAL"
 
 
+def sentence_repeats_message(sentence: str, message: str):
+    message_words = set(re.findall(r"[a-z]+", message.lower()))
+    sentence_words = set(re.findall(r"[a-z]+", sentence.lower()))
+
+    if not message_words or not sentence_words:
+        return False
+
+    shared_ratio = len(message_words & sentence_words) / min(
+        len(message_words),
+        len(sentence_words),
+    )
+    return shared_ratio >= 0.75
+
+
 def clean_response(answer: str, message: str, mode: str):
     """Remove small-model echoing and enforce the selected response mode."""
     if mode == "GREETING":
@@ -427,17 +663,8 @@ def clean_response(answer: str, message: str, mode: str):
         if sentence.strip()
     ]
 
-    if sentences:
-        message_words = set(re.findall(r"[a-z]+", message.lower()))
-        first_words = set(re.findall(r"[a-z]+", sentences[0].lower()))
-
-        if message_words and first_words:
-            shared_ratio = len(message_words & first_words) / min(
-                len(message_words),
-                len(first_words),
-            )
-            if shared_ratio >= 0.75:
-                sentences.pop(0)
+    if sentences and sentence_repeats_message(sentences[0], message):
+        sentences.pop(0)
 
     if mode == "GENERAL":
         statements = [
@@ -458,6 +685,60 @@ def clean_response(answer: str, message: str, mode: str):
 
     cleaned = " ".join(sentences).strip()
     return cleaned or answer.strip()
+
+
+class StreamingResponseFilter:
+    """Release complete sentences while enforcing response-mode rules."""
+
+    def __init__(self, message: str, mode: str):
+        self.message = message
+        self.mode = mode
+        self.buffer = ""
+        self.checked_opening = False
+        self.emitted_sentences = 0
+
+    def _accept(self, sentence: str):
+        sentence = sentence.strip()
+        if not sentence:
+            return ""
+
+        if not self.checked_opening:
+            self.checked_opening = True
+            if sentence_repeats_message(sentence, self.message):
+                return ""
+
+        if sentence.endswith("?") and (
+            self.mode == "GENERAL"
+            or not should_ask_follow_up(self.message)
+        ):
+            return ""
+
+        sentence_limit = 2 if self.mode == "GENERAL" else 3
+        if self.emitted_sentences >= sentence_limit:
+            return ""
+
+        self.emitted_sentences += 1
+        return sentence + " "
+
+    def feed(self, chunk: str):
+        self.buffer += chunk
+        output = []
+
+        while True:
+            match = re.search(r"[.!?\n]", self.buffer)
+            if match is None:
+                break
+
+            end = match.end()
+            output.append(self._accept(self.buffer[:end]))
+            self.buffer = self.buffer[end:]
+
+        return "".join(output)
+
+    def finish(self):
+        tail = self._accept(self.buffer)
+        self.buffer = ""
+        return tail.rstrip()
 
 
 def should_ask_follow_up(message: str):
@@ -548,6 +829,7 @@ def ollama_stream(
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
+            "num_ctx": OLLAMA_NUM_CTX,
         },
     }
 
@@ -669,7 +951,7 @@ async def chat_stream(req: ChatRequest):
     selected_model = resolve_model(req.model)
     # Đọc toàn bộ documents mỗi request
     # để luôn lấy nội dung mới nhất trong docs/
-    context, files = get_chat_context(req.unit)
+    context, files = get_chat_context(req.message, req.unit)
 
     messages = build_messages(
         req.message,
@@ -694,6 +976,7 @@ async def chat_stream(req: ChatRequest):
             "options": {
                 "temperature": req.temperature,
                 "num_predict": min(req.max_tokens, 256),
+                "num_ctx": OLLAMA_NUM_CTX,
             },
         }
 
@@ -803,7 +1086,7 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream_fast(req: ChatRequest):
-    context, _ = get_chat_context(req.unit)
+    context, _ = get_chat_context(req.message, req.unit)
     max_tokens = min(req.max_tokens, 96)
     response_mode = get_response_mode(req.message, req.unit)
 
@@ -824,7 +1107,10 @@ async def chat_stream_fast(req: ChatRequest):
         api_key = resolve_gemini_key()
 
         async def generate():
-            chunks = []
+            stream_filter = StreamingResponseFilter(
+                req.message,
+                response_mode,
+            )
             payload = {
                 "systemInstruction": {
                     "parts": [{"text": VOICE_SYSTEM_PROMPT}],
@@ -881,14 +1167,13 @@ async def chat_stream_fast(req: ChatRequest):
 
                             for part in parts:
                                 if part.get("text") and not part.get("thought"):
-                                    chunks.append(part["text"])
+                                    output = stream_filter.feed(part["text"])
+                                    if output:
+                                        yield output
 
-                    if chunks:
-                        yield clean_response(
-                            "".join(chunks),
-                            req.message,
-                            response_mode,
-                        )
+                    tail = stream_filter.finish()
+                    if tail:
+                        yield tail
             except httpx.HTTPError:
                 yield "The Gemini service is temporarily unavailable."
 
@@ -897,7 +1182,10 @@ async def chat_stream_fast(req: ChatRequest):
         messages = build_messages(req.message, context, req.unit)
 
         async def generate():
-            chunks = []
+            stream_filter = StreamingResponseFilter(
+                req.message,
+                response_mode,
+            )
             payload = {
                 "model": selected_model,
                 "think": False,
@@ -907,6 +1195,7 @@ async def chat_stream_fast(req: ChatRequest):
                 "options": {
                     "temperature": req.temperature,
                     "num_predict": max_tokens,
+                    "num_ctx": OLLAMA_NUM_CTX,
                 },
             }
 
@@ -931,17 +1220,16 @@ async def chat_stream_fast(req: ChatRequest):
                             content = data.get("message", {}).get("content", "")
 
                             if content:
-                                chunks.append(content)
+                                output = stream_filter.feed(content)
+                                if output:
+                                    yield output
 
                             if data.get("done"):
                                 break
 
-                    if chunks:
-                        yield clean_response(
-                            "".join(chunks),
-                            req.message,
-                            response_mode,
-                        )
+                    tail = stream_filter.finish()
+                    if tail:
+                        yield tail
             except httpx.HTTPError:
                 yield "The local Ollama service is unavailable."
 
@@ -957,7 +1245,7 @@ async def chat_stream_fast(req: ChatRequest):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    context, files = get_chat_context(req.unit)
+    context, files = get_chat_context(req.message, req.unit)
     response_mode = get_response_mode(req.message, req.unit)
 
     if response_mode == "GREETING":
@@ -1001,7 +1289,7 @@ def chat(req: ChatRequest):
             messages,
             model=selected_model,
             temperature=req.temperature,
-            max_tokens=min(req.max_tokens, 256),
+            max_tokens=min(req.max_tokens, 96),
         )
     )
     answer = clean_response(answer, req.message, response_mode)

@@ -18,6 +18,7 @@ __pycache__/
 .coverage
 htmlcov/
 *.log
+speech_logs.jsonl
 backend.stdout.log
 backend.stderr.log
 tmp/

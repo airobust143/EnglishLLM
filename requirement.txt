@@ -5,3 +5,7 @@ httpx
 pypdf
 python-docx
 pydantic
+python-multipart
+faster-whisper
+# faster-whisper 1.2.x uses av.open(metadata_errors=...), which was removed in PyAV 19.
+av<19

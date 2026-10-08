@@ -9,46 +9,17 @@ type VoiceState =
   | "speaking"
 
 type VoiceProvider = "ollama" | "gemini"
-type SpeechRecognitionEventLike = Event & {
-  results: {
-    length: number
-    [index: number]: {
-      [index: number]: {
-        transcript: string
-        confidence?: number
-      }
-    }
-  }
-}
-
-type SpeechRecognitionLike = {
-  lang: string
-  continuous: boolean
-  interimResults: boolean
-
-  onstart: (() => void) | null
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  onend: (() => void) | null
-  onerror: ((event: unknown) => void) | null
-
-  start: () => void
-  stop: () => void
-  abort: () => void
-}
-
-type SpeechRecognitionConstructor =
-  new () => SpeechRecognitionLike
-
-declare global {
-  interface Window {
-    SpeechRecognition?: SpeechRecognitionConstructor
-    webkitSpeechRecognition?: SpeechRecognitionConstructor
-  }
-}
-
 const API_URL =
   process.env.NEXT_PUBLIC_VOICE_API_URL ||
   "http://127.0.0.1:8000"
+
+type SpeechLog = {
+  human: string
+  assistant: string
+  provider: VoiceProvider
+  model?: string
+  unit?: number
+}
 
 export default function useVoiceAssistant(unit?: number) {
   const [state, setState] =
@@ -75,8 +46,11 @@ export default function useVoiceAssistant(unit?: number) {
   // Refs
   // --------------------------------
 
-  const recognitionRef =
-    useRef<SpeechRecognitionLike | null>(null)
+  const mediaRecorderRef =
+    useRef<MediaRecorder | null>(null)
+
+  const mediaStreamRef =
+    useRef<MediaStream | null>(null)
 
   const transcriptRef =
     useRef("")
@@ -93,14 +67,50 @@ export default function useVoiceAssistant(unit?: number) {
   const stoppedRef =
     useRef(false)
 
+  const discardRecordingRef =
+    useRef(false)
+
   const requestInFlightRef =
     useRef(false)
+
+  const sendMessageRef =
+    useRef<(text: string) => Promise<void>>(() => Promise.resolve())
 
   const mountedRef =
     useRef(true)
 
   const listeningTimeoutRef =
     useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const silenceTimeoutRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const silenceCheckFrameRef =
+    useRef<number | null>(null)
+
+  const audioContextRef =
+    useRef<AudioContext | null>(null)
+
+  const hasDetectedSpeechRef =
+    useRef(false)
+
+  const listeningStartedAtRef =
+    useRef(0)
+
+  const clearSilenceMonitor = useCallback(() => {
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current)
+      silenceTimeoutRef.current = null
+    }
+
+    if (silenceCheckFrameRef.current !== null) {
+      cancelAnimationFrame(silenceCheckFrameRef.current)
+      silenceCheckFrameRef.current = null
+    }
+
+    void audioContextRef.current?.close()
+    audioContextRef.current = null
+  }, [])
 
   useEffect(() => {
     const savedModel = localStorage.getItem("voiceAssistant_model")
@@ -190,19 +200,8 @@ export default function useVoiceAssistant(unit?: number) {
       return
     }
 
-    if (stoppedRef.current) {
-      return
-    }
-
-    const Recognition =
-      window.SpeechRecognition ||
-      window.webkitSpeechRecognition
-
-    if (!Recognition) {
-      alert(
-        "Speech Recognition is not supported. Please use Chrome."
-      )
-
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setAnswer("Local microphone recording is not supported by this browser.")
       return
     }
 
@@ -210,105 +209,169 @@ export default function useVoiceAssistant(unit?: number) {
 
     // Cancel old recognition
     try {
-      recognitionRef.current?.abort()
+      mediaRecorderRef.current?.stop()
     } catch {}
 
     cancelSpeech()
 
     transcriptRef.current = ""
     setTranscript("")
+    stoppedRef.current = false
+    discardRecordingRef.current = false
+    hasDetectedSpeechRef.current = false
+    listeningStartedAtRef.current = Date.now()
+    clearSilenceMonitor()
 
-    const recognition =
-      new Recognition()
+    void navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        if (stoppedRef.current) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
 
-    recognition.lang = "en-US"
+        mediaStreamRef.current = stream
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : ""
+        const recorder = new MediaRecorder(
+          stream,
+          mimeType ? { mimeType } : undefined,
+        )
+        const chunks: Blob[] = []
 
-    recognition.continuous = false
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            chunks.push(event.data)
+          }
+        }
 
-    recognition.interimResults = true
+        recorder.onstop = async () => {
+          clearSilenceMonitor()
+          stream.getTracks().forEach((track) => track.stop())
+          mediaStreamRef.current = null
+          mediaRecorderRef.current = null
 
-    recognition.onstart = () => {
-      console.log("[VOICE] Listening")
+          if (discardRecordingRef.current || chunks.length === 0) {
+            setState("idle")
+            return
+          }
 
-      transcriptRef.current = ""
+          setState("thinking")
 
-      setTranscript("")
+          try {
+            const extension = recorder.mimeType.includes("webm") ? "webm" : "mp4"
+            const formData = new FormData()
+            formData.append(
+              "audio",
+              new Blob(chunks, { type: recorder.mimeType }),
+              `recording.${extension}`,
+            )
+            const response = await fetch(`${API_URL}/transcribe`, {
+              method: "POST",
+              body: formData,
+            })
 
-      setState("listening")
-    }
+            if (!response.ok) {
+              const error = await response.json().catch(() => null) as { detail?: string } | null
+              throw new Error(error?.detail || "Local transcription failed.")
+            }
 
-    recognition.onresult = (
-      event
-    ) => {
-      let text = ""
+            const data = await response.json() as { text?: string }
+            const text = data.text?.trim() || ""
+            if (!text) {
+              setAnswer("I could not hear any speech. Please try again.")
+              setState("idle")
+              return
+            }
 
-      for (
-        let i = 0;
-        i < event.results.length;
-        i++
-      ) {
-        text +=
-          event.results[i][0].transcript
-      }
+            transcriptRef.current = text
+            setTranscript(text)
+            await sendMessageRef.current(text)
+          } catch (error) {
+            console.error("[VOICE] Local transcription failed:", error)
+            setAnswer(error instanceof Error ? error.message : "Local transcription failed.")
+            setState("idle")
+          }
+        }
 
-      text = text.trim()
+        mediaRecorderRef.current = recorder
+        recorder.start()
+        setState("listening")
+        console.log("[VOICE] Recording locally")
 
-      console.log(
-        "[VOICE] Transcript:",
-        text
-      )
+        try {
+          const AudioContextConstructor =
+            window.AudioContext ||
+            (window as Window & {
+              webkitAudioContext?: typeof AudioContext
+            }).webkitAudioContext
 
-      transcriptRef.current = text
+          if (AudioContextConstructor) {
+            const audioContext = new AudioContextConstructor()
+            const analyser = audioContext.createAnalyser()
+            const source = audioContext.createMediaStreamSource(stream)
+            const samples = new Uint8Array(analyser.fftSize)
 
-      setTranscript(text)
-    }
+            analyser.fftSize = 512
+            source.connect(analyser)
+            audioContextRef.current = audioContext
 
-    recognition.onerror = (
-      event
-    ) => {
-      console.error(
-        "[VOICE] Recognition error:",
-        event
-      )
+            const checkForSilence = () => {
+              if (mediaRecorderRef.current !== recorder || recorder.state !== "recording") {
+                return
+              }
 
-      setState("idle")
-    }
+              analyser.getByteTimeDomainData(samples)
+              let squaredTotal = 0
 
-    recognition.onend = () => {
-      const text =
-        transcriptRef.current.trim()
+              for (const sample of samples) {
+                const normalized = (sample - 128) / 128
+                squaredTotal += normalized * normalized
+              }
 
-      console.log(
-        "[VOICE] Recognition ended:",
-        text
-      )
+              const volume = Math.sqrt(squaredTotal / samples.length)
+              const elapsed = Date.now() - listeningStartedAtRef.current
 
-      if (stoppedRef.current) {
-        return
-      }
+              if (volume > 0.035) {
+                hasDetectedSpeechRef.current = true
+                if (silenceTimeoutRef.current) {
+                  clearTimeout(silenceTimeoutRef.current)
+                  silenceTimeoutRef.current = null
+                }
+              } else if (
+                hasDetectedSpeechRef.current &&
+                !silenceTimeoutRef.current
+              ) {
+                silenceTimeoutRef.current = setTimeout(() => {
+                  silenceTimeoutRef.current = null
+                  if (recorder.state === "recording") {
+                    recorder.stop()
+                  }
+                }, 900)
+              }
 
-      if (!text) {
+              if (elapsed >= 30000 && recorder.state === "recording") {
+                recorder.stop()
+                return
+              }
+
+              silenceCheckFrameRef.current =
+                requestAnimationFrame(checkForSilence)
+            }
+
+            silenceCheckFrameRef.current =
+              requestAnimationFrame(checkForSilence)
+          }
+        } catch (error) {
+          console.warn("[VOICE] Silence detection unavailable:", error)
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("[VOICE] Microphone access failed:", error)
+        setAnswer("Microphone access is required for local transcription.")
         setState("idle")
-        return
-      }
-
-      sendMessage(text)
-    }
-
-    recognitionRef.current =
-      recognition
-
-    try {
-      recognition.start()
-    } catch (error) {
-      console.error(
-        "[VOICE] Recognition start failed:",
-        error
-      )
-
-      setState("idle")
-    }
-  }, [cancelSpeech])
+      })
+  }, [cancelSpeech, clearSilenceMonitor])
 
   // --------------------------------
   // TTS queue
@@ -418,10 +481,17 @@ export default function useVoiceAssistant(unit?: number) {
     utterance.onerror = (
       event
     ) => {
-      console.error(
-        "[TTS] Error:",
-        event
-      )
+      const isExpectedCancellation =
+        event.error === "canceled" ||
+        event.error === "interrupted"
+
+      if (isExpectedCancellation) {
+        console.debug("[TTS] Speech canceled:", event.error)
+        speakingRef.current = false
+        return
+      } else {
+        console.error("[TTS] Error:", event.error)
+      }
 
       speakingRef.current = false
 
@@ -540,7 +610,7 @@ export default function useVoiceAssistant(unit?: number) {
 
                 temperature: 0.2,
 
-                max_tokens: 256,
+                max_tokens: 96,
               }),
 
               signal:
@@ -628,6 +698,35 @@ export default function useVoiceAssistant(unit?: number) {
             enqueueSpeech(sentenceBuffer.trim())
           }
 
+          const assistantText = fullText.trim()
+
+          if (assistantText) {
+            try {
+              const logResponse = await fetch(`${API_URL}/logs/speech`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  human: message,
+                  assistant: assistantText,
+                  provider,
+                  model: provider === "gemini"
+                    ? "gemini-3.8-flash"
+                    : selectedModel || undefined,
+                  unit,
+                } satisfies SpeechLog),
+              })
+
+              if (!logResponse.ok) {
+                const detail = await logResponse.text()
+                throw new Error(
+                  `Speech log request failed (${logResponse.status}): ${detail}`,
+                )
+              }
+            } catch (error) {
+              console.error("[VOICE] Could not save speech log:", error)
+            }
+          }
+
           streamCompleted = true
 
           console.log(
@@ -698,9 +797,13 @@ export default function useVoiceAssistant(unit?: number) {
       stoppedRef.current =
         true
 
+      clearSilenceMonitor()
+
       try {
-        recognitionRef.current?.abort()
+        mediaRecorderRef.current?.stop()
       } catch {}
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
+      mediaStreamRef.current = null
 
       try {
         abortControllerRef.current?.abort()
@@ -717,7 +820,7 @@ export default function useVoiceAssistant(unit?: number) {
       }
 
       setState("idle")
-    }, [cancelSpeech])
+    }, [cancelSpeech, clearSilenceMonitor])
 
   // --------------------------------
   // Cleanup
@@ -728,10 +831,14 @@ export default function useVoiceAssistant(unit?: number) {
 
     return () => {
       mountedRef.current = false
+      discardRecordingRef.current = true
+      clearSilenceMonitor()
 
       try {
-        recognitionRef.current?.abort()
+        mediaRecorderRef.current?.stop()
       } catch {}
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
+      mediaStreamRef.current = null
 
       try {
         abortControllerRef.current?.abort()
@@ -756,7 +863,9 @@ export default function useVoiceAssistant(unit?: number) {
 
       speakingRef.current = false
     }
-  }, [])
+  }, [clearSilenceMonitor])
+
+  sendMessageRef.current = sendMessage
 
   // --------------------------------
   // Public API
