@@ -44,6 +44,6 @@ A same-holdout Gemini-v2 run was attempted but did not return a result within th
 
 ## Reproducibility notes
 
-- Release tag: `localtutor-iccitt-2026-v2-eval` (commit recorded in the tagged README and Git metadata).
+- Release tag: `localtutor-iccit-2026-v2-eval` (commit recorded in Git metadata).
 - Ollama version: 0.40.15.
 - Raw records include the 1.7B five-condition runs and the 4B v1/v2 runs.

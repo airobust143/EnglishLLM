@@ -4,11 +4,11 @@ This directory contains the fixed 28-test-case Stage-B/C protocol, benchmark run
 
 ## Release identifier
 
-- Git tag: `localtutor-iccitt-2026-v2-eval`
+- Git tag: `localtutor-iccit-2026-v2-eval`
 - Base repository commit before the evaluated additions: `b59b0abc1c8ef6cd604f706900b95e38bdecf0fe`
 - Holdout protocol SHA-256: `6ef8498b9b4c774119491b8a00c424c41e5de982a35e13a71d588540e82effe7`
 
-The tag itself identifies the final release commit. Use `git rev-list -n 1 localtutor-iccitt-2026-v2-eval` to recover that commit.
+The tag itself identifies the final release commit. Use `git rev-list -n 1 localtutor-iccit-2026-v2-eval` to recover that commit.
 
 ## Recorded configuration
 
