@@ -1,0 +1,41 @@
+{
+  "protocol_version": "2026-11-09-v1",
+  "frozen_before_model_runs": true,
+  "description": "Twenty-eight authored typed probes for routing, memory, targeted correction, out-of-list errors, topic/general negative controls, and greetings.",
+  "cases": [
+    {"id":"U01","family":"update","unit":3,"expected_route":"MEMORY","history":[["I play the guitar.","That is a popular instrument."],["Actually, I play the violin, not the guitar.","Thanks for correcting me."]],"message":"What instrument do I play?","required":["violin"],"forbidden":["guitar"],"role_check":true},
+    {"id":"U02","family":"update","unit":1,"expected_route":"MEMORY","history":[["I wash the dishes on Saturdays.","That helps your family."],["I meant Sundays, not Saturdays.","Understood."]],"message":"When did I say I wash the dishes?","required":["sunday"],"forbidden":["saturday"],"role_check":true},
+    {"id":"U03","family":"update","unit":2,"expected_route":"MEMORY","history":[["I go to school by bus.","That is convenient."],["No, I mean I go by bicycle.","Thanks for the correction."]],"message":"How do I usually go to school?","required":["bicycle"],"forbidden":["bus"],"role_check":true},
+    {"id":"U04","family":"update","unit":1,"expected_route":"MEMORY","history":[["My brother plays basketball after school.","That sounds active."],["Correction: my brother plays chess after school.","I understand."]],"message":"What did I say my brother plays?","required":["your brother","chess"],"forbidden":["basketball"],"role_check":true},
+    {"id":"U05","family":"update","unit":3,"expected_route":"MEMORY","history":[["My favourite music is jazz.","Jazz has a rich history."],["Rather, my favourite music is pop.","Thanks for clarifying."]],"message":"What did I mention about my favourite music?","required":["pop"],"forbidden":["jazz"],"role_check":true},
+    {"id":"U06","family":"update","unit":1,"expected_route":"MEMORY","history":[["I clean my room every evening.","That is a useful routine."],["Sorry, I clean it only on weekends.","Noted."]],"message":"When did I tell you I clean my room?","required":["weekend"],"forbidden":["evening"],"role_check":true},
+
+    {"id":"F01","family":"followup","unit":3,"expected_route":"MEMORY","history":[["I listen to music before breakfast.","That sounds relaxing."]],"message":"When did I say I listen to music?","required":["before breakfast"],"forbidden":[],"role_check":true},
+    {"id":"F02","family":"followup","unit":2,"expected_route":"MEMORY","history":[["I reuse glass jars at home.","That can reduce waste."]],"message":"What did I mention that I reuse?","required":["glass","jar"],"forbidden":[],"role_check":true},
+    {"id":"F03","family":"followup","unit":1,"expected_route":"MEMORY","history":[["My cousin cooks dinner on Fridays.","That is helpful."]],"message":"Who did I say cooks dinner on Fridays?","required":["your cousin"],"forbidden":[],"role_check":true},
+    {"id":"F04","family":"followup","unit":3,"expected_route":"MEMORY","history":[["I practise the piano in the library music room.","That is a quiet place to practise."]],"message":"Where did I say I practise the piano?","required":["library","music room"],"forbidden":[],"role_check":true},
+
+    {"id":"E01","family":"targeted_error","unit":2,"expected_route":"CORRECTION","history":[],"message":"We should use less plastic bottles.","required":["fewer plastic bottles"],"forbidden":["less plastic bottles"],"role_check":false},
+    {"id":"E02","family":"targeted_error","unit":3,"expected_route":"CORRECTION","history":[],"message":"She play the piano every day.","required":["she plays"],"forbidden":["she play "],"role_check":false},
+    {"id":"E03","family":"targeted_error","unit":3,"expected_route":"CORRECTION","history":[],"message":"My sister enjoys sing pop songs.","required":["enjoys singing"],"forbidden":["enjoys sing "],"role_check":false},
+    {"id":"E04","family":"targeted_error","unit":3,"expected_route":"CORRECTION","history":[],"message":"I like dance after school.","required":["like dancing|like to dance"],"forbidden":["like dance "],"role_check":false},
+    {"id":"E05","family":"targeted_error","unit":1,"expected_route":"CORRECTION","history":[],"message":"My father wash the dishes at night.","required":["father washes"],"forbidden":["father wash "],"role_check":false},
+
+    {"id":"X01","family":"out_of_list_error","unit":1,"expected_route":"TOPIC","history":[],"message":"Yesterday I go to the market with my mother.","required":["went"],"forbidden":["yesterday i go"],"role_check":false},
+    {"id":"X02","family":"out_of_list_error","unit":3,"expected_route":"TOPIC","history":[],"message":"I am interested on music festivals.","required":["interested in"],"forbidden":["interested on"],"role_check":false},
+    {"id":"X03","family":"out_of_list_error","unit":2,"expected_route":"GENERAL","history":[],"message":"This way is more easier for students.","required":["easier"],"forbidden":["more easier"],"role_check":false},
+    {"id":"X04","family":"out_of_list_error","unit":1,"expected_route":"TOPIC","history":[],"message":"I bought book about family life.","required":["a book"],"forbidden":["bought book"],"role_check":false},
+
+    {"id":"T01","family":"topic","unit":2,"expected_route":"TOPIC","history":[],"message":"How can students reduce plastic waste?","required":["plastic|waste|reuse|recycle"],"forbidden":[],"role_check":false},
+    {"id":"T02","family":"topic","unit":1,"expected_route":"TOPIC","history":[],"message":"Why should family members share chores?","required":["chore|family|responsib"],"forbidden":[],"role_check":false},
+    {"id":"T03","family":"topic","unit":3,"expected_route":"TOPIC","history":[],"message":"What makes a live music performance enjoyable?","required":["music|performance|audience|song"],"forbidden":[],"role_check":false},
+    {"id":"T04","family":"topic","unit":3,"expected_route":"TOPIC","history":[],"message":"Name one instrument used in popular music.","required":["guitar|piano|drum|instrument"],"forbidden":[],"role_check":false},
+
+    {"id":"N01","family":"negative_control","unit":3,"expected_route":"GENERAL","history":[["I play the guitar.","That is a common instrument."]],"message":"Tell me one fact about a violin.","required":["violin"],"forbidden":["you play"],"role_check":false},
+    {"id":"N02","family":"negative_control","unit":3,"expected_route":"TOPIC","history":[["I play the violin.","That takes practice."]],"message":"What instrument does the Unit 3 lesson discuss?","required":["instrument|music|guitar|piano"],"forbidden":["you play violin"],"role_check":false},
+    {"id":"N03","family":"negative_control","unit":1,"expected_route":"GENERAL","history":[["I wash dishes on Sundays.","That is helpful."]],"message":"What is the capital of France?","required":["paris"],"forbidden":["sunday|dishes"],"role_check":false},
+
+    {"id":"G01","family":"greeting","unit":1,"expected_route":"GREETING","history":[],"message":"Hello","required":["hi|hello"],"forbidden":[],"role_check":false},
+    {"id":"G02","family":"greeting","unit":2,"expected_route":"GREETING","history":[],"message":"Good morning","required":["morning|hello|hi"],"forbidden":[],"role_check":false}
+  ]
+}

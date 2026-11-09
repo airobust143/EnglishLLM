@@ -1,0 +1,19 @@
+{
+  "protocol_sha256": "6ef8498b9b4c774119491b8a00c424c41e5de982a35e13a71d588540e82effe7",
+  "provider": "ollama",
+  "model": "qwen3:1.7b",
+  "cap": 56,
+  "variants": {
+    "v2_raw_turns": {
+      "n": 28,
+      "requests_ok": 28,
+      "route_correct": 28,
+      "functional_pass": 17,
+      "median_words": 9.0,
+      "median_ms": 1555.0680500164162,
+      "truncated": 0,
+      "filter_activated": 0,
+      "reasoning_leakage": 0
+    }
+  }
+}

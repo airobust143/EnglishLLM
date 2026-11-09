@@ -1,0 +1,30 @@
+{
+  "protocol_sha256": "6ef8498b9b4c774119491b8a00c424c41e5de982a35e13a71d588540e82effe7",
+  "provider": "ollama",
+  "model": "qwen3:4b-instruct-2507-q4_K_M",
+  "cap": 56,
+  "variants": {
+    "v1": {
+      "n": 28,
+      "requests_ok": 28,
+      "route_correct": 28,
+      "functional_pass": 18,
+      "median_words": 15.0,
+      "median_ms": 10188.934599980712,
+      "truncated": 0,
+      "filter_activated": 0,
+      "reasoning_leakage": 0
+    },
+    "v2": {
+      "n": 28,
+      "requests_ok": 28,
+      "route_correct": 28,
+      "functional_pass": 20,
+      "median_words": 14.0,
+      "median_ms": 2904.61879997747,
+      "truncated": 0,
+      "filter_activated": 0,
+      "reasoning_leakage": 0
+    }
+  }
+}
